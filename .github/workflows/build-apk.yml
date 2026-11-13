@@ -22,7 +22,6 @@ jobs:
     name: Build APK
     runs-on: ubuntu-latest
     env:
-      HAS_GOOGLE_SERVICES_SECRET: ${{ secrets.GOOGLE_SERVICES_JSON != '' }}
       HAS_RELEASE_SIGNING: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && secrets.STORE_PASSWORD != '' && secrets.KEY_PASSWORD != '' }}
 
     steps:
@@ -62,13 +61,23 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Prepare google-services.json if provided via secret
-        if: env.HAS_GOOGLE_SERVICES_SECRET == 'true'
+      - name: Prepare google-services.json
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
-          if [ ! -f app/google-services.json ] && [ -n "${GOOGLE_SERVICES_JSON}" ]; then
-            printf '%s' "${GOOGLE_SERVICES_JSON}" > app/google-services.json
+          if [ ! -f app/google-services.json ] && [ -n "${GOOGLE_SERVICES_JSON:-}" ]; then
+            TRIMMED="$(printf '%s' "${GOOGLE_SERVICES_JSON}" | sed -e 's/^[[:space:]]*//')"
+            case "${TRIMMED}" in
+              \{*)
+                printf '%s' "${GOOGLE_SERVICES_JSON}" > app/google-services.json
+                ;;
+              *)
+                printf '%s' "${GOOGLE_SERVICES_JSON}" | base64 -d > app/google-services.json
+                ;;
+            esac
+          fi
+          if [ ! -f app/google-services.json ]; then
+            echo "::warning::app/google-services.json is missing. Add GOOGLE_SERVICES_JSON to GitHub repository Secrets (or include app/google-services.json) for Firebase Auth, Firestore, and Gemini AI to work in the built APK."
           fi
 
       - name: Run Unit & Robolectric Tests
