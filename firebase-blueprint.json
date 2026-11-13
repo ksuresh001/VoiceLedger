@@ -1,0 +1,238 @@
+{
+  "entities": {
+    "VoiceNote": {
+      "title": "VoiceNote",
+      "description": "Captured voice note with audio metadata, speech transcript, AI categorization/tags/keywords, aging timestamps, and action resolution state.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Authenticated creator UID."
+        },
+        "ownerName": {
+          "type": "string",
+          "description": "Display name of creator."
+        },
+        "workspaceId": {
+          "type": "string",
+          "description": "Optional team workspace ID; empty string for personal notes."
+        },
+        "memberUids": {
+          "type": "array",
+          "description": "Bounded list of UIDs permitted to access and collaborate on this note."
+        },
+        "title": {
+          "type": "string",
+          "description": "Short actionable headline for the voice note."
+        },
+        "transcript": {
+          "type": "string",
+          "description": "Speech-to-text transcript of the voice capture."
+        },
+        "aiSummary": {
+          "type": "string",
+          "description": "AI-generated concise summary."
+        },
+        "category": {
+          "type": "string",
+          "description": "Primary classification such as Official, Personal, Client, Finance, Health, Ideas, or custom."
+        },
+        "tags": {
+          "type": "array",
+          "description": "Up to 8 AI-driven topic tags."
+        },
+        "keywords": {
+          "type": "array",
+          "description": "Up to 12 searchable keywords extracted by AI."
+        },
+        "actionItem": {
+          "type": "string",
+          "description": "Concrete next action required to resolve the note."
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["high", "medium", "low"],
+          "description": "Urgency level."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open", "in_progress", "closed"],
+          "description": "Resolution lifecycle status."
+        },
+        "resolutionNote": {
+          "type": "string",
+          "description": "Summary of how the item was resolved."
+        },
+        "resolvedByUid": {
+          "type": "string",
+          "description": "UID of user who closed the item."
+        },
+        "resolvedByName": {
+          "type": "string",
+          "description": "Display name of user who closed the item."
+        },
+        "assigneeName": {
+          "type": "string",
+          "description": "Optional teammate assigned to execute the action."
+        },
+        "localAudioFileName": {
+          "type": "string",
+          "description": "Filename of the local AAC voice recording in app-private audio_notes storage."
+        },
+        "audioDurationSec": {
+          "type": "integer",
+          "description": "Recorded audio duration in seconds."
+        },
+        "dueAtMs": {
+          "type": "integer",
+          "description": "Deadline epoch milliseconds, or 0 if unscheduled."
+        },
+        "reminderMinutesBefore": {
+          "type": "integer",
+          "description": "Lead time in minutes before deadline for local push notification."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when note was created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update (FieldValue.serverTimestamp())."
+        },
+        "closedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional server timestamp when note was marked closed (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "ownerId",
+        "ownerName",
+        "workspaceId",
+        "memberUids",
+        "title",
+        "transcript",
+        "aiSummary",
+        "category",
+        "tags",
+        "keywords",
+        "actionItem",
+        "priority",
+        "status",
+        "resolutionNote",
+        "resolvedByUid",
+        "resolvedByName",
+        "assigneeName",
+        "localAudioFileName",
+        "audioDurationSec",
+        "dueAtMs",
+        "reminderMinutesBefore",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Workspace": {
+      "title": "Workspace",
+      "description": "Shared cloud team workspace for collaborative voice notes and action resolution.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Team workspace name."
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of workspace creator."
+        },
+        "ownerName": {
+          "type": "string",
+          "description": "Display name of workspace creator."
+        },
+        "joinCode": {
+          "type": "string",
+          "description": "6-to-10 character uppercase invite code."
+        },
+        "memberUids": {
+          "type": "array",
+          "description": "Bounded list of team member UIDs (max 25)."
+        },
+        "memberNames": {
+          "type": "array",
+          "description": "Bounded list of team member display names (max 25)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when workspace was created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last workspace update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "name",
+        "ownerId",
+        "ownerName",
+        "joinCode",
+        "memberUids",
+        "memberNames",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WorkspaceInvite": {
+      "title": "WorkspaceInvite",
+      "description": "Invite lookup record keyed by uppercase join code.",
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "description": "Target workspace document ID."
+        },
+        "workspaceName": {
+          "type": "string",
+          "description": "Target workspace display name."
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Workspace creator UID."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "workspaceId",
+        "workspaceName",
+        "ownerId",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/notes/{noteId}": {
+      "schema": {
+        "$ref": "#/entities/VoiceNote"
+      },
+      "description": "Voice notes and action items scoped to memberUids for personal and team collaboration."
+    },
+    "/workspaces/{workspaceId}": {
+      "schema": {
+        "$ref": "#/entities/Workspace"
+      },
+      "description": "Team workspaces shared across collaborating members."
+    },
+    "/workspace_invites/{joinCode}": {
+      "schema": {
+        "$ref": "#/entities/WorkspaceInvite"
+      },
+      "description": "Direct-lookup invite records keyed by 6-char uppercase code (no list access)."
+    }
+  }
+}

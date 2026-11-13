@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">VoiceLedger</string>
+    <string name="auth_tagline">Voice Capture • AI Organization • Team Resolution</string>
+    <string name="auth_headline">Speak once. Track until closed.</string>
+    <string name="auth_subtitle">Capture voice notes with live text, AI tags, aging alerts, cloud team sync, and PDF or Excel exports.</string>
+    <string name="sign_in_with_google">Sign in with Google</string>
+    <string name="cd_hero_illustration">Studio microphone and executive ledger illustration</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "VoiceLedger",
+  "description": "AI-powered voice note capture, aging-tracked task resolution, cloud team workspaces, deadline alerts, and PDF/Excel reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
