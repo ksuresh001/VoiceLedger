@@ -24,12 +24,17 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+import com.example.firebase.FirebaseRuntimeConfig
+
 private const val TAG = "GoogleAuthManager"
 
 private fun resolveDefaultWebClientId(context: Context): String? {
     val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
-    if (resId == 0) return null
-    return runCatching { context.getString(resId) }.getOrNull()?.takeIf { it.isNotBlank() }
+    if (resId != 0) {
+        val fromRes = runCatching { context.getString(resId) }.getOrNull()?.takeIf { it.isNotBlank() }
+        if (fromRes != null) return fromRes
+    }
+    return FirebaseRuntimeConfig.getWebClientId(context)
 }
 
 fun attemptAutoSignIn(

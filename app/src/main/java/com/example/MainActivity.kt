@@ -1,5 +1,6 @@
 package com.example
 
+import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -11,11 +12,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Groups
@@ -24,6 +28,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +36,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -65,6 +71,7 @@ import androidx.navigation.navArgument
 import com.example.data.preferences.UserPrefsDataStore
 import com.example.data.repository.NotesRepository
 import com.example.data.repository.WorkspaceRepository
+import com.example.firebase.FirebaseRuntimeConfig
 import com.example.firebase.configureAppCheck
 import com.example.service.AiOrganizerService
 import com.example.service.DeadlineNotificationReceiver
@@ -101,6 +108,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Restore runtime Firebase config if APK was built without bundled google-services.json
+        FirebaseRuntimeConfig.ensureInitialized(this)
+
         // Step 1: Configure Firebase App Check with launch intent before Compose UI or ViewModels
         configureAppCheck(this, intent)
 
@@ -131,12 +141,17 @@ private fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
 @Composable
 fun AppNavigation(initialNoteId: String? = null) {
     val context = LocalContext.current
-    val isFirebaseReady = remember {
-        FirebaseApp.getApps(context).isNotEmpty() ||
-            runCatching { FirebaseApp.initializeApp(context) != null }.getOrDefault(false)
+    var isFirebaseReady by remember {
+        mutableStateOf(FirebaseRuntimeConfig.ensureInitialized(context))
     }
     if (!isFirebaseReady) {
-        FirebaseConfigMissingScreen()
+        FirebaseConfigSetupScreen(
+            onConfigured = {
+                val activity = context as? Activity
+                configureAppCheck(context, activity?.intent)
+                isFirebaseReady = FirebaseRuntimeConfig.ensureInitialized(context)
+            }
+        )
         return
     }
 
@@ -159,33 +174,90 @@ fun AppNavigation(initialNoteId: String? = null) {
 }
 
 @Composable
-private fun FirebaseConfigMissingScreen() {
+private fun FirebaseConfigSetupScreen(onConfigured: () -> Unit) {
+    val context = LocalContext.current
+    var rawJson by remember { mutableStateOf("") }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .safeDrawingPadding()
-            .padding(24.dp),
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
         contentAlignment = Alignment.Center
     ) {
         Surface(
-            color = MaterialTheme.colorScheme.errorContainer,
-            shape = RoundedCornerShape(20.dp),
-            modifier = Modifier.widthIn(max = 480.dp)
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(22.dp),
+            tonalElevation = 2.dp,
+            modifier = Modifier.widthIn(max = 520.dp)
         ) {
             Column(
-                modifier = Modifier.padding(24.dp),
+                modifier = Modifier.padding(22.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "Firebase Config Missing in APK",
+                    text = "Connect Firebase Config",
                     style = MaterialTheme.typography.headlineSmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = "This APK was built without app/google-services.json. To enable sign-in, cloud sync, and AI transcription, add GOOGLE_SERVICES_JSON to your GitHub repository Secrets (or commit app/google-services.json) and rebuild the APK.",
+                    text = "This APK was built without app/google-services.json (GitHub exports omit it by default). You can either:",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onErrorContainer
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Text(
+                    text = "1. Paste your app/google-services.json below to activate this APK immediately without rebuilding.\n2. Or add GOOGLE_SERVICES_JSON to GitHub Settings → Secrets → Actions and re-run the Build Android APK workflow.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = rawJson,
+                    onValueChange = {
+                        rawJson = it
+                        errorText = null
+                    },
+                    label = { Text("Paste app/google-services.json contents") },
+                    minLines = 5,
+                    maxLines = 9,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("google_services_json_input")
+                )
+
+                if (!errorText.isNullOrBlank()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = errorText!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        FirebaseRuntimeConfig.saveAndInitialize(context, rawJson)
+                            .onSuccess { onConfigured() }
+                            .onFailure { err ->
+                                errorText = err.message ?: "Invalid google-services.json format."
+                            }
+                    },
+                    enabled = rawJson.isNotBlank(),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("apply_firebase_config_button")
+                ) {
+                    Text("Apply Firebase Config & Continue")
+                }
             }
         }
     }

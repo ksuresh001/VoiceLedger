@@ -77,7 +77,17 @@ jobs:
             esac
           fi
           if [ ! -f app/google-services.json ]; then
-            echo "::warning::app/google-services.json is missing. Add GOOGLE_SERVICES_JSON to GitHub repository Secrets (or include app/google-services.json) for Firebase Auth, Firestore, and Gemini AI to work in the built APK."
+            echo "::warning::app/google-services.json is missing. Add GOOGLE_SERVICES_JSON to GitHub repository Secrets so Firebase Auth, Firestore, and Gemini AI are pre-bundled in the APK."
+            {
+              echo "### ⚠️ Firebase Config Missing (`app/google-services.json`)"
+              echo "The APK compiled successfully, but \`app/google-services.json\` was not present during the build."
+              echo ""
+              echo "To pre-bundle Firebase configuration in your GitHub APKs:"
+              echo "1. Copy the contents of \`app/google-services.json\` from AI Studio."
+              echo "2. Open **GitHub Repository → Settings → Secrets and variables → Actions → New repository secret**."
+              echo "3. Name the secret \`GOOGLE_SERVICES_JSON\` and paste the JSON contents."
+              echo "4. Re-run **Build Android APK**."
+            } >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Run Unit & Robolectric Tests
@@ -87,6 +97,7 @@ jobs:
             --tests "com.example.ExampleUnitTest" \
             --tests "com.example.ExampleRobolectricTest" \
             --tests "com.example.service.AiOrganizerServiceTest" \
+            --tests "com.example.firebase.FirebaseRuntimeConfigTest" \
             --no-daemon
 
       - name: Build Debug APK
