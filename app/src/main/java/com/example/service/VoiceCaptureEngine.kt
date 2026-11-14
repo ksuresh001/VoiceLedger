@@ -1,14 +1,9 @@
 package com.example.service
 
-import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.media.AudioFormat
-import android.media.AudioRecord
 import android.media.MediaPlayer
-import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -16,7 +11,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
-import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,15 +26,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
-import java.io.RandomAccessFile
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.Locale
-import java.util.UUID
-import kotlin.math.abs
-import kotlin.math.sqrt
 
 data class CaptureLiveState(
     val isRecording: Boolean = false,
@@ -52,58 +40,83 @@ data class CaptureLiveState(
     val recordedFileName: String = ""
 ) {
     val fullTranscript: String
-        get() = listOf(confirmedTranscript, partialTranscript)
-            .filter { it.isNotBlank() }
-            .joinToString(" ")
-            .trim()
+        get() = mergeTranscriptSegments(confirmedTranscript, partialTranscript)
+}
+
+internal fun mergeTranscriptSegments(confirmed: String, partial: String): String {
+    val c = confirmed.trim()
+    val p = partial.trim()
+    if (c.isEmpty()) return p
+    if (p.isEmpty()) return c
+    if (c.endsWith(p, ignoreCase = true)) return c
+    if (p.startsWith(c, ignoreCase = true)) return p
+    return "$c $p".trim()
+}
+
+internal fun extractRecognitionText(bundle: Bundle?): String {
+    if (bundle == null) return ""
+    val primary = bundle
+        .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+        ?.firstOrNull { it.isNotBlank() }
+        ?.trim()
+        .orEmpty()
+    val unstable = bundle
+        .getStringArrayList("android.speech.extra.UNSTABLE_TEXT")
+        ?.firstOrNull { it.isNotBlank() }
+        ?.trim()
+        .orEmpty()
+    return mergeTranscriptSegments(primary, unstable)
 }
 
 class VoiceCaptureEngine(
     private val context: Context,
     private val scope: CoroutineScope
 ) {
+    private val audioRecorder = MicrophoneAudioRecorder(context, scope)
     private val _state = MutableStateFlow(CaptureLiveState())
     val state: StateFlow<CaptureLiveState> = _state.asStateFlow()
 
-    private var audioRecord: AudioRecord? = null
-    private var recordJob: Job? = null
-    private var timerJob: Job? = null
     private var pipeWriterJob: Job? = null
-
+    private var speechRestartJob: Job? = null
+    private var engineTimerJob: Job? = null
+    private var speechWatchdogJob: Job? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var pipeReadFd: ParcelFileDescriptor? = null
     private var pipeWriteFd: ParcelFileDescriptor? = null
     private var pipeChannel: Channel<ByteArray>? = null
+    private var finalSpeechResultSignal: CompletableDeferred<Unit>? = null
 
-    private var currentFile: File? = null
     @Volatile
     private var isCapturingFlag = false
+    @Volatile
     private var shouldContinueRecognition = false
+    @Volatile
+    private var usePipedMode = false
     private var captureStartMs = 0L
 
-    fun audioDirectory(): File {
-        val dir = File(context.filesDir, "audio_notes")
-        if (!dir.exists()) dir.mkdirs()
-        return dir
+    init {
+        scope.launch {
+            audioRecorder.state.collect { rec ->
+                if (isCapturingFlag && rec.isRecording) {
+                    _state.value = _state.value.copy(
+                        elapsedSec = maxOf(_state.value.elapsedSec, rec.elapsedSec),
+                        amplitude = rec.amplitude,
+                        hasDetectedSpeechSignal = _state.value.hasDetectedSpeechSignal || rec.hasDetectedSignal,
+                        recordedFileName = rec.outputFileName.ifBlank { _state.value.recordedFileName }
+                    )
+                }
+            }
+        }
     }
 
-    fun getAudioFile(fileName: String): File? {
-        if (fileName.isBlank()) return null
-        val file = File(audioDirectory(), fileName)
-        if (!file.exists()) return null
-        val minBytes = if (file.extension.equals("wav", ignoreCase = true)) WAV_HEADER_SIZE.toLong() + 1L else 1L
-        return if (file.length() >= minBytes) file else null
-    }
+    fun audioDirectory(): File = audioRecorder.audioDirectory()
 
-    @SuppressLint("MissingPermission")
+    fun getAudioFile(fileName: String): File? = audioRecorder.getAudioFile(fileName)
+
     fun startCapture() {
         discardCapture()
 
-        val hasMicPermission = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!hasMicPermission) {
+        if (!MicrophoneAudioRecorder.hasPermission(context)) {
             _state.value = CaptureLiveState(
                 isRecording = false,
                 speechStatusMessage = "Microphone permission required to record audio."
@@ -111,288 +124,301 @@ class VoiceCaptureEngine(
             return
         }
 
-        val fileName = "vn_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.wav"
-        val outFile = File(audioDirectory(), fileName)
-
-        val minBuf = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE_HZ,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        ).let { if (it <= 0) 4096 else maxOf(it * 2, 4096) }
-
-        val recorder = createAudioRecord(minBuf)
-        if (recorder == null) {
-            _state.value = CaptureLiveState(
-                isRecording = false,
-                speechStatusMessage = "Microphone is busy or unavailable on this device."
-            )
-            return
-        }
-
-        try {
-            recorder.startRecording()
-        } catch (e: Exception) {
-            Log.e(TAG, "AudioRecord startRecording failed", e)
-            runCatching { recorder.release() }
-            _state.value = CaptureLiveState(
-                isRecording = false,
-                speechStatusMessage = "Could not start microphone capture."
-            )
-            return
-        }
-
-        audioRecord = recorder
-        currentFile = outFile
         isCapturingFlag = true
+        shouldContinueRecognition = true
         captureStartMs = System.currentTimeMillis()
+        finalSpeechResultSignal = CompletableDeferred()
 
-        val canUsePipeSpeech = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            SpeechRecognizer.isRecognitionAvailable(context)
-
-        _state.value = CaptureLiveState(
-            isRecording = true,
-            elapsedSec = 0,
-            amplitude = 0f,
-            hasDetectedSpeechSignal = false,
-            confirmedTranscript = "",
-            partialTranscript = "",
-            speechStatusMessage = if (canUsePipeSpeech) {
-                "Listening & recording audio..."
-            } else {
-                "Recording audio — Gemini AI transcribes on stop"
-            },
-            recordedFileName = fileName
-        )
-
-        if (canUsePipeSpeech) {
-            startPipedSpeechRecognizer()
-        }
-
-        recordJob = scope.launch(Dispatchers.IO) {
-            writePcmToWav(recorder, outFile, minBuf)
-        }
-
-        timerJob = scope.launch {
+        // Start a dedicated elapsed-time ticker so timer updates smoothly in all capture modes
+        engineTimerJob = scope.launch {
             while (isActive && isCapturingFlag) {
-                delay(100L)
-                val elapsed = ((System.currentTimeMillis() - captureStartMs) / 1000L).toInt().coerceAtLeast(0)
+                delay(150L)
+                val elapsed = ((System.currentTimeMillis() - captureStartMs) / 1000L)
+                    .toInt()
+                    .coerceAtLeast(0)
                 _state.value = _state.value.copy(elapsedSec = elapsed)
             }
         }
-    }
 
-    @SuppressLint("MissingPermission")
-    private fun createAudioRecord(bufferSizeBytes: Int): AudioRecord? {
-        val sources = listOf(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            MediaRecorder.AudioSource.MIC
-        )
-        for (source in sources) {
-            try {
-                val ar = AudioRecord(
-                    source,
-                    SAMPLE_RATE_HZ,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSizeBytes
+        // On Android 13+ (API 33+), AudioRecord can feed SpeechRecognizer via EXTRA_AUDIO_SOURCE pipe.
+        // On Android 10-12 (including Android 11 / API 30), holding AudioRecord in the foreground UI
+        // silences SpeechRecognizer's background service. Running direct SpeechRecognizer first on
+        // API < 33 guarantees instant live speech-to-text, with AudioRecord as automatic fallback.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            usePipedMode = true
+            val started = audioRecorder.startRecording(
+                filePrefix = "vn",
+                onPcmChunk = { chunkBytes -> pipeChannel?.trySend(chunkBytes) }
+            )
+            if (started) {
+                _state.value = CaptureLiveState(
+                    isRecording = true,
+                    elapsedSec = 0,
+                    speechStatusMessage = "Listening — live speech & audio capture",
+                    recordedFileName = audioRecorder.state.value.outputFileName
                 )
-                if (ar.state == AudioRecord.STATE_INITIALIZED) {
-                    return ar
+                scope.launch(Dispatchers.Main.immediate) {
+                    startSpeechRecognizerSession(piped = true)
                 }
-                ar.release()
-            } catch (e: Exception) {
-                Log.w(TAG, "AudioRecord init failed for source=$source: ${e.message}")
-            }
-        }
-        return null
-    }
-
-    private suspend fun writePcmToWav(
-        recorder: AudioRecord,
-        outFile: File,
-        bufferSizeBytes: Int
-    ) {
-        val shortCount = (bufferSizeBytes / 2).coerceAtLeast(1024)
-        val shortBuffer = ShortArray(shortCount)
-        val byteBuffer = ByteBuffer.allocate(shortCount * 2).order(ByteOrder.LITTLE_ENDIAN)
-        var totalPcmBytes = 0L
-
-        try {
-            FileOutputStream(outFile).use { fos ->
-                // Reserve 44-byte RIFF/WAVE header, updated after capture ends
-                fos.write(ByteArray(WAV_HEADER_SIZE))
-
-                while (isCapturingFlag) {
-                    val readShorts = recorder.read(shortBuffer, 0, shortBuffer.size)
-                    if (readShorts > 0) {
-                        var sumSquares = 0.0
-                        var peakAbs = 0
-                        byteBuffer.clear()
-                        for (i in 0 until readShorts) {
-                            val sample = shortBuffer[i]
-                            val absSample = abs(sample.toInt())
-                            if (absSample > peakAbs) peakAbs = absSample
-                            sumSquares += sample.toDouble() * sample.toDouble()
-                            byteBuffer.putShort(sample)
-                        }
-                        val chunkBytes = byteBuffer.array().copyOf(readShorts * 2)
-                        fos.write(chunkBytes)
-                        totalPcmBytes += chunkBytes.size
-
-                        // Forward PCM bytes to SpeechRecognizer pipe without ever blocking AudioRecord
-                        pipeChannel?.trySend(chunkBytes)
-
-                        val rms = sqrt(sumSquares / readShorts)
-                        val normalizedAmp = ((rms / 6000.0).toFloat()).coerceIn(0f, 1f)
-                        val detectedSignal = _state.value.hasDetectedSpeechSignal || peakAbs > 220
-                        _state.value = _state.value.copy(
-                            amplitude = normalizedAmp,
-                            hasDetectedSpeechSignal = detectedSignal
-                        )
-                    } else if (readShorts < 0) {
-                        Log.w(TAG, "AudioRecord.read returned error code: $readShorts")
-                        break
+                // Watchdog: if AudioRecord detects speech signal on API 33+ but piped recognizer
+                // produces no text within 3 seconds (OEM recognizer ignoring EXTRA_AUDIO_SOURCE),
+                // switch to direct SpeechRecognizer.
+                speechWatchdogJob = scope.launch(Dispatchers.Main.immediate) {
+                    delay(3_200L)
+                    if (isCapturingFlag &&
+                        usePipedMode &&
+                        _state.value.hasDetectedSpeechSignal &&
+                        _state.value.fullTranscript.isBlank()
+                    ) {
+                        Log.i(TAG, "Piped SpeechRecognizer produced no text after speech signal; switching to direct SpeechRecognizer")
+                        usePipedMode = false
+                        closePipeResources()
+                        audioRecorder.stopRecording()
+                        startSpeechRecognizerSession(piped = false)
                     }
                 }
-                fos.flush()
+            } else {
+                // If AudioRecord couldn't start, still start direct SpeechRecognizer
+                usePipedMode = false
+                _state.value = CaptureLiveState(
+                    isRecording = true,
+                    elapsedSec = 0,
+                    speechStatusMessage = "Listening — speaking converts live to text..."
+                )
+                scope.launch(Dispatchers.Main.immediate) {
+                    startSpeechRecognizerSession(piped = false)
+                }
             }
-
-            if (outFile.exists() && totalPcmBytes > 0L) {
-                writeWavHeader(outFile, totalPcmBytes)
+        } else {
+            usePipedMode = false
+            _state.value = CaptureLiveState(
+                isRecording = true,
+                elapsedSec = 0,
+                speechStatusMessage = "Listening — speaking converts live to text..."
+            )
+            scope.launch(Dispatchers.Main.immediate) {
+                startSpeechRecognizerSession(piped = false)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error writing WAV audio", e)
         }
     }
 
-    private fun writeWavHeader(wavFile: File, totalAudioLen: Long) {
-        val totalDataLen = totalAudioLen + 36L
-        val byteRate = SAMPLE_RATE_HZ * 1 * 16 / 8
-        val header = ByteBuffer.allocate(WAV_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN).apply {
-            put("RIFF".toByteArray(Charsets.US_ASCII))
-            putInt(totalDataLen.toInt())
-            put("WAVE".toByteArray(Charsets.US_ASCII))
-            put("fmt ".toByteArray(Charsets.US_ASCII))
-            putInt(16) // PCM subchunk size
-            putShort(1.toShort()) // AudioFormat = 1 (PCM)
-            putShort(1.toShort()) // NumChannels = 1 (Mono)
-            putInt(SAMPLE_RATE_HZ)
-            putInt(byteRate)
-            putShort(2.toShort()) // BlockAlign = NumChannels * BitsPerSample/8
-            putShort(16.toShort()) // BitsPerSample = 16
-            put("data".toByteArray(Charsets.US_ASCII))
-            putInt(totalAudioLen.toInt())
-        }.array()
-
-        RandomAccessFile(wavFile, "rw").use { raf ->
-            raf.seek(0)
-            raf.write(header)
+    private fun commitPartialToConfirmed() {
+        val current = _state.value
+        val merged = mergeTranscriptSegments(current.confirmedTranscript, current.partialTranscript)
+        if (merged != current.confirmedTranscript || current.partialTranscript.isNotEmpty()) {
+            _state.value = current.copy(
+                confirmedTranscript = merged,
+                partialTranscript = ""
+            )
         }
     }
 
-    private fun startPipedSpeechRecognizer() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    private fun startSpeechRecognizerSession(piped: Boolean) {
+        if (!isCapturingFlag || !shouldContinueRecognition) return
         try {
             closePipeResources()
-            val pipe = ParcelFileDescriptor.createPipe()
-            val readFd = pipe[0]
-            val writeFd = pipe[1]
-            pipeReadFd = readFd
-            pipeWriteFd = writeFd
+            var readFd: ParcelFileDescriptor? = null
+            if (piped && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val pipe = ParcelFileDescriptor.createPipe()
+                readFd = pipe[0]
+                val writeFd = pipe[1]
+                pipeReadFd = readFd
+                pipeWriteFd = writeFd
 
-            val channel = Channel<ByteArray>(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
-            pipeChannel = channel
-            shouldContinueRecognition = true
+                val channel = Channel<ByteArray>(
+                    capacity = 64,
+                    onBufferOverflow = BufferOverflow.DROP_OLDEST
+                )
+                pipeChannel = channel
 
-            pipeWriterJob = scope.launch(Dispatchers.IO) {
-                try {
-                    ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { stream ->
-                        for (chunk in channel) {
-                            stream.write(chunk)
+                pipeWriterJob = scope.launch(Dispatchers.IO) {
+                    try {
+                        ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { stream ->
+                            for (chunk in channel) {
+                                stream.write(chunk)
+                            }
+                            stream.flush()
                         }
-                        stream.flush()
+                    } catch (e: IOException) {
+                        Log.d(TAG, "SpeechRecognizer pipe closed: ${e.message}")
+                    } finally {
+                        pipeWriteFd = null
                     }
-                } catch (e: IOException) {
-                    Log.w(TAG, "SpeechRecognizer pipe closed: ${e.message}")
-                    shouldContinueRecognition = false
-                } finally {
-                    pipeWriteFd = null
                 }
             }
 
-            speechRecognizer?.destroy()
-            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    if (isCapturingFlag) {
-                        _state.value = _state.value.copy(speechStatusMessage = "Listening — live speech & audio capture")
-                    }
-                }
-
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-
-                override fun onError(error: Int) {
-                    Log.w(TAG, "Live SpeechRecognizer paused (code=$error); continuing audio capture for Gemini AI")
-                    shouldContinueRecognition = false
-                    closePipeResources()
-                    if (isCapturingFlag) {
-                        _state.value = _state.value.copy(
-                            speechStatusMessage = "Recording voice audio — Gemini AI transcribes on stop"
-                        )
-                    }
-                }
-
-                override fun onResults(results: Bundle?) {
-                    val text = results
-                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()
-                        ?.trim()
-                        .orEmpty()
-                    if (text.isNotEmpty()) {
-                        val prev = _state.value.confirmedTranscript
-                        val merged = if (prev.isBlank()) text else "$prev $text"
-                        _state.value = _state.value.copy(
-                            confirmedTranscript = merged,
-                            partialTranscript = ""
-                        )
-                    }
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {
-                    val partial = partialResults
-                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()
-                        ?.trim()
-                        .orEmpty()
-                    if (partial.isNotEmpty()) {
-                        _state.value = _state.value.copy(partialTranscript = partial)
-                    }
-                }
-
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-            speechRecognizer = recognizer
+            if (speechRecognizer == null) {
+                val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+                recognizer.setRecognitionListener(createRecognitionListener())
+                speechRecognizer = recognizer
+            }
 
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd)
-                putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
-                putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
-                putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, SAMPLE_RATE_HZ)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 4000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15000L)
+                if (piped && readFd != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd)
+                    putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+                    putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+                    putExtra(
+                        RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE,
+                        AudioRecordingConfig.DEFAULT_SAMPLE_RATE_HZ
+                    )
+                }
             }
-            recognizer.startListening(intent)
+            speechRecognizer?.startListening(intent)
         } catch (e: Exception) {
-            Log.w(TAG, "Piped SpeechRecognizer unavailable, using Gemini AI audio transcription", e)
-            shouldContinueRecognition = false
+            Log.w(TAG, "SpeechRecognizer startListening failed (piped=$piped), activating audio fallback", e)
+            handleFatalSpeechError()
+        }
+    }
+
+    private fun createRecognitionListener(): RecognitionListener = object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) {
+            if (isCapturingFlag) {
+                _state.value = _state.value.copy(
+                    speechStatusMessage = "Listening — speak clearly into microphone"
+                )
+            }
+        }
+
+        override fun onBeginningOfSpeech() {
+            if (isCapturingFlag) {
+                _state.value = _state.value.copy(
+                    hasDetectedSpeechSignal = true,
+                    speechStatusMessage = "Transcribing live speech..."
+                )
+            }
+        }
+
+        override fun onRmsChanged(rmsdB: Float) {
+            if (isCapturingFlag && !audioRecorder.state.value.isRecording) {
+                val normalized = ((rmsdB + 2f) / 12f).coerceIn(0.04f, 1f)
+                val detected = _state.value.hasDetectedSpeechSignal || rmsdB > 1.5f
+                _state.value = _state.value.copy(
+                    amplitude = normalized,
+                    hasDetectedSpeechSignal = detected
+                )
+            }
+        }
+
+        override fun onBufferReceived(buffer: ByteArray?) {}
+
+        override fun onEndOfSpeech() {
+            commitPartialToConfirmed()
+        }
+
+        override fun onPartialResults(partialResults: Bundle?) {
+            val partial = extractRecognitionText(partialResults)
+            if (partial.isNotEmpty()) {
+                _state.value = _state.value.copy(
+                    partialTranscript = partial,
+                    hasDetectedSpeechSignal = true,
+                    speechStatusMessage = "Transcribing live speech..."
+                )
+            }
+        }
+
+        override fun onResults(results: Bundle?) {
+            val recognized = extractRecognitionText(results)
+            val current = _state.value
+            val segmentToCommit = recognized.ifBlank { current.partialTranscript }
+            if (segmentToCommit.isNotBlank()) {
+                val merged = mergeTranscriptSegments(current.confirmedTranscript, segmentToCommit)
+                _state.value = current.copy(
+                    confirmedTranscript = merged,
+                    partialTranscript = "",
+                    hasDetectedSpeechSignal = true
+                )
+            } else {
+                commitPartialToConfirmed()
+            }
+
+            if (!isCapturingFlag || !shouldContinueRecognition) {
+                finalSpeechResultSignal?.complete(Unit)
+                return
+            }
+
+            scheduleSpeechRestart(delayMs = 80L)
+        }
+
+        override fun onError(error: Int) {
+            commitPartialToConfirmed()
+
+            if (!isCapturingFlag || !shouldContinueRecognition) {
+                finalSpeechResultSignal?.complete(Unit)
+                return
+            }
+
+            when (error) {
+                SpeechRecognizer.ERROR_NO_MATCH,
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
+                11 /* ERROR_SERVER_DISCONNECTED */ -> {
+                    scheduleSpeechRestart(delayMs = 90L)
+                }
+
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
+                    scheduleSpeechRestart(delayMs = 350L)
+                }
+
+                else -> {
+                    Log.w(TAG, "SpeechRecognizer error code=$error (usePipedMode=$usePipedMode)")
+                    if (usePipedMode) {
+                        // Piped EXTRA_AUDIO_SOURCE failed on this ROM; switch to direct SpeechRecognizer
+                        usePipedMode = false
+                        closePipeResources()
+                        scope.launch(Dispatchers.Main.immediate) {
+                            audioRecorder.stopRecording()
+                            runCatching { speechRecognizer?.destroy() }
+                            speechRecognizer = null
+                            startSpeechRecognizerSession(piped = false)
+                        }
+                    } else {
+                        handleFatalSpeechError()
+                    }
+                }
+            }
+        }
+
+        override fun onEvent(eventType: Int, params: Bundle?) {}
+    }
+
+    private fun scheduleSpeechRestart(delayMs: Long) {
+        speechRestartJob?.cancel()
+        speechRestartJob = scope.launch(Dispatchers.Main.immediate) {
             closePipeResources()
+            delay(delayMs)
+            if (isCapturingFlag && shouldContinueRecognition) {
+                startSpeechRecognizerSession(piped = usePipedMode)
+            }
+        }
+    }
+
+    private fun handleFatalSpeechError() {
+        shouldContinueRecognition = false
+        closePipeResources()
+        runCatching { speechRecognizer?.destroy() }
+        speechRecognizer = null
+
+        if (isCapturingFlag && !audioRecorder.state.value.isRecording) {
+            val started = audioRecorder.startRecording(filePrefix = "vn")
             _state.value = _state.value.copy(
-                speechStatusMessage = "Recording voice audio — Gemini AI transcribes on stop"
+                isRecording = started,
+                recordedFileName = audioRecorder.state.value.outputFileName,
+                speechStatusMessage = if (started) {
+                    "Recording voice audio — AI transcribes on stop"
+                } else {
+                    "Microphone is busy or unavailable on this device."
+                }
+            )
+        } else if (isCapturingFlag) {
+            _state.value = _state.value.copy(
+                speechStatusMessage = "Recording voice audio — AI transcribes on stop"
             )
         }
     }
@@ -415,45 +441,43 @@ class VoiceCaptureEngine(
     fun discardCapture() {
         isCapturingFlag = false
         shouldContinueRecognition = false
-        timerJob?.cancel()
-        timerJob = null
-        recordJob?.cancel()
-        recordJob = null
+        speechWatchdogJob?.cancel()
+        speechWatchdogJob = null
+        speechRestartJob?.cancel()
+        speechRestartJob = null
+        engineTimerJob?.cancel()
+        engineTimerJob = null
         closePipeResources()
+        finalSpeechResultSignal?.complete(Unit)
 
-        runCatching { speechRecognizer?.stopListening() }
-        runCatching { speechRecognizer?.destroy() }
-        speechRecognizer = null
-
-        runCatching { audioRecord?.stop() }
-        runCatching { audioRecord?.release() }
-        audioRecord = null
-
-        currentFile?.let { file ->
-            if (file.exists()) file.delete()
+        scope.launch(Dispatchers.Main.immediate) {
+            runCatching { speechRecognizer?.cancel() }
+            runCatching { speechRecognizer?.destroy() }
+            speechRecognizer = null
         }
-        currentFile = null
+
+        audioRecorder.cancelRecording()
         _state.value = CaptureLiveState()
     }
 
     private suspend fun stopCaptureInternal(keepFile: Boolean): CaptureLiveState {
-        val wasActiveSpeech = shouldContinueRecognition
+        val wasActiveSpeech = shouldContinueRecognition && speechRecognizer != null
         isCapturingFlag = false
         shouldContinueRecognition = false
-        timerJob?.cancel()
-        timerJob = null
+        speechWatchdogJob?.cancel()
+        speechWatchdogJob = null
+        speechRestartJob?.cancel()
+        speechRestartJob = null
+        engineTimerJob?.cancel()
+        engineTimerJob = null
 
-        runCatching { audioRecord?.stop() }
-        withContext(Dispatchers.IO) {
-            withTimeoutOrNull(1500L) {
-                recordJob?.join()
-            }
+        val recordingResult = if (audioRecorder.state.value.isRecording) {
+            audioRecorder.stopRecording()
+        } else {
+            null
         }
-        recordJob = null
-        runCatching { audioRecord?.release() }
-        audioRecord = null
 
-        // Signal EOF to piped SpeechRecognizer so it can flush final results briefly
+        // Signal EOF to piped SpeechRecognizer so it can flush final results
         pipeChannel?.close()
         pipeChannel = null
         withContext(Dispatchers.IO) {
@@ -466,36 +490,55 @@ class VoiceCaptureEngine(
         pipeWriteFd = null
 
         if (wasActiveSpeech) {
-            runCatching { speechRecognizer?.stopListening() }
-            delay(250L)
+            withContext(Dispatchers.Main.immediate) {
+                runCatching { speechRecognizer?.stopListening() }
+            }
+            withTimeoutOrNull(750L) {
+                finalSpeechResultSignal?.await()
+            }
         }
-        runCatching { speechRecognizer?.destroy() }
-        speechRecognizer = null
+
+        commitPartialToConfirmed()
+
+        withContext(Dispatchers.Main.immediate) {
+            runCatching { speechRecognizer?.destroy() }
+            speechRecognizer = null
+        }
         runCatching { pipeReadFd?.close() }
         pipeReadFd = null
 
-        val file = currentFile
-        val validFile = keepFile && file != null && file.exists() && file.length() > WAV_HEADER_SIZE.toLong()
-        if (!keepFile && file != null && file.exists()) {
-            file.delete()
-        }
-        if (!validFile) {
-            currentFile = null
+        val savedFile = recordingResult?.file
+            ?: _state.value.recordedFileName.takeIf { it.isNotBlank() }?.let { getAudioFile(it) }
+
+        if (!keepFile) {
+            savedFile?.let { if (it.exists()) it.delete() }
         }
 
         val elapsedFinal = if (captureStartMs > 0L) {
-            ((System.currentTimeMillis() - captureStartMs) / 1000L).toInt().coerceAtLeast(_state.value.elapsedSec)
+            ((System.currentTimeMillis() - captureStartMs) / 1000L)
+                .toInt()
+                .coerceAtLeast(recordingResult?.durationSec ?: _state.value.elapsedSec)
         } else {
-            _state.value.elapsedSec
+            recordingResult?.durationSec ?: _state.value.elapsedSec
         }
 
+        val finalFileName = if (keepFile && savedFile != null && savedFile.exists()) {
+            savedFile.name
+        } else {
+            ""
+        }
+
+        val finalTranscript = _state.value.fullTranscript
         val finalState = _state.value.copy(
             isRecording = false,
             elapsedSec = elapsedFinal,
             amplitude = 0f,
-            confirmedTranscript = _state.value.fullTranscript,
+            hasDetectedSpeechSignal = _state.value.hasDetectedSpeechSignal ||
+                (recordingResult?.hasDetectedSignal == true) ||
+                finalTranscript.isNotBlank(),
+            confirmedTranscript = finalTranscript,
             partialTranscript = "",
-            recordedFileName = if (validFile) file!!.name else ""
+            recordedFileName = finalFileName
         )
         _state.value = finalState
         return finalState
@@ -503,8 +546,6 @@ class VoiceCaptureEngine(
 
     private companion object {
         const val TAG = "VoiceCaptureEngine"
-        const val SAMPLE_RATE_HZ = 16000
-        const val WAV_HEADER_SIZE = 44
     }
 }
 

@@ -2,6 +2,7 @@ package com.example.firebase
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.ui.auth.resolveWebClientId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -104,6 +105,13 @@ class FirebaseRuntimeConfigTest {
             "runtime-web-client.apps.googleusercontent.com",
             FirebaseRuntimeConfig.getWebClientId(context)
         )
+        val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+        val expectedClientId = if (resId != 0) {
+            context.getString(resId)
+        } else {
+            "runtime-web-client.apps.googleusercontent.com"
+        }
+        assertEquals(expectedClientId, resolveWebClientId(context))
         assertTrue(FirebaseRuntimeConfig.ensureInitialized(context))
     }
 }

@@ -50,21 +50,26 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import com.example.R
+import kotlinx.coroutines.Job
 
 @Composable
 fun AuthScreen(
     onAuthSuccess: () -> Unit
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
     val scope = rememberCoroutineScope()
-    val credentialManager = remember { runCatching { CredentialManager.create(context) }.getOrNull() }
+    val credentialManager = remember(activity, context) {
+        runCatching { CredentialManager.create(activity ?: context) }.getOrNull()
+    }
 
     var isSigningIn by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var autoSignInJob by remember { mutableStateOf<Job?>(null) }
 
     LaunchedEffect(Unit) {
-        attemptAutoSignIn(
-            context = context,
+        autoSignInJob = attemptAutoSignIn(
+            context = activity ?: context,
             credentialManager = credentialManager,
             onAuthSuccess = onAuthSuccess,
             onUnauthenticated = {},
@@ -191,10 +196,12 @@ fun AuthScreen(
 
                 Button(
                     onClick = {
+                        autoSignInJob?.cancel()
+                        autoSignInJob = null
                         errorMessage = null
                         isSigningIn = true
                         onGoogleSignInClicked(
-                            context = context,
+                            context = activity ?: context,
                             credentialManager = credentialManager,
                             onAuthSuccess = {
                                 isSigningIn = false

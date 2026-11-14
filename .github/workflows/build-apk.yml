@@ -97,6 +97,7 @@ jobs:
             --tests "com.example.ExampleUnitTest" \
             --tests "com.example.ExampleRobolectricTest" \
             --tests "com.example.service.AiOrganizerServiceTest" \
+            --tests "com.example.service.AudioRecordingServiceTest" \
             --tests "com.example.firebase.FirebaseRuntimeConfigTest" \
             --no-daemon
 

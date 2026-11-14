@@ -1,6 +1,5 @@
 package com.example
 
-import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -57,7 +56,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -80,6 +82,7 @@ import com.example.service.ReportExportService
 import com.example.service.VoiceAudioPlayer
 import com.example.service.VoiceCaptureEngine
 import com.example.ui.auth.AuthScreen
+import com.example.ui.auth.findActivity
 import com.example.ui.auth.signOut
 import com.example.ui.screens.CaptureBottomSheet
 import com.example.ui.screens.DashboardScreen
@@ -89,14 +92,9 @@ import com.example.ui.screens.WorkspacesAndExportScreen
 import com.example.ui.theme.VoiceLedgerTheme
 import com.example.ui.viewmodel.VoiceLedgerViewModel
 import com.google.firebase.Firebase
-import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 
 const val ROUTE_DASHBOARD = "dashboard"
@@ -130,24 +128,17 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
-    val listener = FirebaseAuth.AuthStateListener { auth ->
-        trySend(auth.currentUser)
-    }
-    addAuthStateListener(listener)
-    awaitClose { removeAuthStateListener(listener) }
-}
-
 @Composable
 fun AppNavigation(initialNoteId: String? = null) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var isFirebaseReady by remember {
         mutableStateOf(FirebaseRuntimeConfig.ensureInitialized(context))
     }
     if (!isFirebaseReady) {
         FirebaseConfigSetupScreen(
             onConfigured = {
-                val activity = context as? Activity
+                val activity = context.findActivity()
                 configureAppCheck(context, activity?.intent)
                 isFirebaseReady = FirebaseRuntimeConfig.ensureInitialized(context)
             }
@@ -156,18 +147,45 @@ fun AppNavigation(initialNoteId: String? = null) {
     }
 
     val auth = remember { Firebase.auth }
-    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    var currentUser by remember(auth) { mutableStateOf(auth.currentUser) }
+
+    // Keep AuthStateListener active across ON_PAUSE/ON_STOP so returning from external
+    // Google login/account redirects never misses the authenticated Firebase user.
+    DisposableEffect(auth, lifecycleOwner) {
+        currentUser = auth.currentUser
+        val authListener = FirebaseAuth.AuthStateListener { firebaseAuth ->
+            currentUser = firebaseAuth.currentUser
+        }
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                currentUser = auth.currentUser
+            }
+        }
+        auth.addAuthStateListener(authListener)
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+        onDispose {
+            auth.removeAuthStateListener(authListener)
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+        }
+    }
 
     val user = currentUser
     if (user == null) {
-        AuthScreen(onAuthSuccess = {})
+        AuthScreen(
+            onAuthSuccess = {
+                currentUser = auth.currentUser
+            }
+        )
     } else {
         key(user.uid) {
             AuthenticatedVoiceLedgerApp(
                 currentUserId = user.uid,
                 currentUserName = user.displayName ?: user.email?.substringBefore("@") ?: "User",
                 currentUserEmail = user.email.orEmpty(),
-                initialNoteId = initialNoteId
+                initialNoteId = initialNoteId,
+                onSignedOut = {
+                    currentUser = auth.currentUser
+                }
             )
         }
     }
@@ -268,13 +286,17 @@ private fun AuthenticatedVoiceLedgerApp(
     currentUserId: String,
     currentUserName: String,
     currentUserEmail: String,
-    initialNoteId: String?
+    initialNoteId: String?,
+    onSignedOut: () -> Unit
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
     val scope = rememberCoroutineScope()
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
-    val credentialManager = remember { CredentialManager.create(context) }
+    val credentialManager = remember(activity, context) {
+        runCatching { CredentialManager.create(activity ?: context) }.getOrNull()
+    }
 
     val viewModel: VoiceLedgerViewModel = viewModel(
         key = currentUserId,
@@ -507,7 +529,7 @@ private fun AuthenticatedVoiceLedgerApp(
                                     }
                                 },
                                 onSignOut = {
-                                    signOut(credentialManager, scope)
+                                    signOut(credentialManager, scope, onSignOutComplete = onSignedOut)
                                 },
                                 modifier = Modifier.statusBarsPadding()
                             )
@@ -627,7 +649,10 @@ private fun AuthenticatedVoiceLedgerApp(
             workspaces = dashboardState.workspaces,
             defaultWorkspaceId = defaultWs,
             isSaving = isBusy,
-            onStartCapture = { captureEngine.startCapture() },
+            onStartCapture = {
+                viewModel.resetAiOrganizeState()
+                captureEngine.startCapture()
+            },
             onStopAndOrganize = { preferredCat ->
                 scope.launch {
                     val finalLive = captureEngine.stopCapture()

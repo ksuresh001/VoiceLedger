@@ -360,6 +360,8 @@ class VoiceLedgerViewModel(
         }
     }
 
+    private var organizeJob: kotlinx.coroutines.Job? = null
+
     fun organizeCapturedNote(
         transcript: String,
         audioFile: File?,
@@ -384,21 +386,28 @@ class VoiceLedgerViewModel(
             reminderMinutesBefore = userPrefs.value.defaultLeadMinutes
         )
 
-        viewModelScope.launch {
+        organizeJob?.cancel()
+        organizeJob = viewModelScope.launch {
             _aiOrganizeState.value = AiOrganizeState.Processing
-            val aiResult: Result<OrganizedNoteResult> = if (audioFile != null && audioFile.exists()) {
-                aiOrganizerService.transcribeAndOrganizeAudio(
-                    audioFile = audioFile,
-                    existingTranscript = cleanTranscript,
-                    preferredCategory = preferredCategory
-                )
-            } else if (cleanTranscript.isNotBlank()) {
+            // When live SpeechRecognizer already captured the spoken transcript, organize directly
+            // from text so we never block on a slow mobile audio upload.
+            val aiResult: Result<OrganizedNoteResult> = if (cleanTranscript.isNotBlank()) {
                 aiOrganizerService.organizeFromTranscript(
                     transcript = cleanTranscript,
                     preferredCategory = preferredCategory
                 )
+            } else if (audioFile != null && audioFile.exists()) {
+                aiOrganizerService.transcribeAndOrganizeAudio(
+                    audioFile = audioFile,
+                    existingTranscript = "",
+                    preferredCategory = preferredCategory
+                )
             } else {
-                Result.failure(IllegalArgumentException("No voice audio or transcript captured."))
+                Result.failure(
+                    IllegalArgumentException(
+                        "No spoken words were detected. Tap Record to speak again or type your note below."
+                    )
+                )
             }
 
             aiResult.onSuccess { organized ->
@@ -432,7 +441,8 @@ class VoiceLedgerViewModel(
     }
 
     fun retryTranscribeDraft(draft: CaptureDraft, audioFile: File?) {
-        viewModelScope.launch {
+        organizeJob?.cancel()
+        organizeJob = viewModelScope.launch {
             _aiOrganizeState.value = AiOrganizeState.Processing
             val aiResult: Result<OrganizedNoteResult> = if (audioFile != null && audioFile.exists()) {
                 aiOrganizerService.transcribeAndOrganizeAudio(
@@ -480,6 +490,8 @@ class VoiceLedgerViewModel(
     }
 
     fun resetAiOrganizeState() {
+        organizeJob?.cancel()
+        organizeJob = null
         _aiOrganizeState.value = AiOrganizeState.Idle
     }
 

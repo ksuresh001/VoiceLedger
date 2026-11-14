@@ -1,9 +1,5 @@
 package com.example.ui.screens
 
-import android.Manifest
-import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -55,16 +51,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import com.example.data.model.DefaultCategories
 import com.example.data.model.NotePriority
 import com.example.data.model.Workspace
 import com.example.service.CaptureLiveState
 import com.example.ui.components.LiveWaveformCanvas
+import com.example.ui.components.MicrophonePermissionCard
 import com.example.ui.components.formatSeconds
+import com.example.ui.components.rememberMicrophonePermissionState
 import com.example.ui.viewmodel.AiOrganizeState
 import com.example.ui.viewmodel.CaptureDraft
 import java.text.SimpleDateFormat
@@ -90,34 +86,30 @@ fun CaptureBottomSheet(
     onSaveDraft: (CaptureDraft) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var preferredCategory by remember { mutableStateOf("Official") }
     var manualTextMode by remember { mutableStateOf(false) }
     var manualTranscript by remember { mutableStateOf("") }
     var permissionDenied by remember { mutableStateOf(false) }
 
-    val micPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
+    val micPermission = rememberMicrophonePermissionState(
+        onPermissionGranted = {
             permissionDenied = false
-            onStartCapture()
-        } else {
+            if (aiOrganizeState is AiOrganizeState.Idle && !liveState.isRecording && !manualTextMode) {
+                onStartCapture()
+            }
+        },
+        onPermissionDenied = {
             permissionDenied = true
         }
-    }
+    )
 
     LaunchedEffect(Unit) {
         if (aiOrganizeState is AiOrganizeState.Idle && !liveState.isRecording) {
-            val hasMic = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-            if (hasMic) {
+            if (micPermission.isGranted) {
                 onStartCapture()
             } else {
-                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                micPermission.requestPermission()
             }
         }
     }
@@ -193,6 +185,13 @@ fun CaptureBottomSheet(
                         isSaving = isSaving,
                         bannerMessage = null,
                         onRetryTranscribe = onRetryTranscribe,
+                        onRecordAgain = {
+                            if (micPermission.isGranted) {
+                                onStartCapture()
+                            } else {
+                                micPermission.requestPermission()
+                            }
+                        },
                         onSave = onSaveDraft,
                         onDiscard = onDismiss
                     )
@@ -205,39 +204,24 @@ fun CaptureBottomSheet(
                         isSaving = isSaving,
                         bannerMessage = aiOrganizeState.message,
                         onRetryTranscribe = onRetryTranscribe,
+                        onRecordAgain = {
+                            if (micPermission.isGranted) {
+                                onStartCapture()
+                            } else {
+                                micPermission.requestPermission()
+                            }
+                        },
                         onSave = onSaveDraft,
                         onDiscard = onDismiss
                     )
                 }
 
                 is AiOrganizeState.Idle -> {
-                    if (permissionDenied) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            shape = RoundedCornerShape(16.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = "Microphone permission is needed to record voice audio and live speech.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
-                                )
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Button(
-                                        onClick = { micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }
-                                    ) {
-                                        Text("Grant Mic Access")
-                                    }
-                                    OutlinedButton(onClick = { manualTextMode = true }) {
-                                        Text("Type Note Instead")
-                                    }
-                                }
-                            }
-                        }
+                    if (permissionDenied && !micPermission.isGranted) {
+                        MicrophonePermissionCard(
+                            controller = micPermission,
+                            onFallbackToText = { manualTextMode = true }
+                        )
                     }
 
                     // Category Hint Chips
@@ -312,9 +296,9 @@ fun CaptureBottomSheet(
                                     Text(
                                         text = liveState.fullTranscript.ifBlank {
                                             if (liveState.isRecording && liveState.hasDetectedSpeechSignal) {
-                                                "Speech audio detected — keep speaking. Gemini AI will convert your recording to full text when you tap Stop."
+                                                "Hearing your voice — converting speech to text..."
                                             } else {
-                                                "Speak your note, decision, or task naturally... Your voice audio is recorded and converted to text."
+                                                "Speak your note, decision, or task naturally... Words appear here live as you speak."
                                             }
                                         },
                                         style = MaterialTheme.typography.bodyLarge,
@@ -352,12 +336,12 @@ fun CaptureBottomSheet(
                             } else {
                                 Button(
                                     onClick = {
-                                        val hasMic = ContextCompat.checkSelfPermission(
-                                            context,
-                                            Manifest.permission.RECORD_AUDIO
-                                        ) == PackageManager.PERMISSION_GRANTED
-                                        if (hasMic) onStartCapture()
-                                        else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                        if (micPermission.isGranted) {
+                                            permissionDenied = false
+                                            onStartCapture()
+                                        } else {
+                                            micPermission.requestPermission()
+                                        }
                                     },
                                     shape = RoundedCornerShape(16.dp),
                                     modifier = Modifier
@@ -428,6 +412,7 @@ private fun DraftReviewEditor(
     isSaving: Boolean,
     bannerMessage: String?,
     onRetryTranscribe: (CaptureDraft) -> Unit,
+    onRecordAgain: () -> Unit,
     onSave: (CaptureDraft) -> Unit,
     onDiscard: () -> Unit
 ) {
@@ -455,12 +440,32 @@ private fun DraftReviewEditor(
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    text = bannerMessage,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    modifier = Modifier.padding(12.dp)
-                )
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = bannerMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    OutlinedButton(
+                        onClick = onRecordAgain,
+                        enabled = !isSaving,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("record_voice_again_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Mic,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Record Voice Again")
+                    }
+                }
             }
         }
 
