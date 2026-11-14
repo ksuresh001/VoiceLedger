@@ -57,9 +57,8 @@ fun AuthScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val credentialManager = remember { CredentialManager.create(context) }
+    val credentialManager = remember { runCatching { CredentialManager.create(context) }.getOrNull() }
 
-    var isCheckingSession by remember { mutableStateOf(true) }
     var isSigningIn by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
@@ -67,13 +66,8 @@ fun AuthScreen(
         attemptAutoSignIn(
             context = context,
             credentialManager = credentialManager,
-            onAuthSuccess = {
-                isCheckingSession = false
-                onAuthSuccess()
-            },
-            onUnauthenticated = {
-                isCheckingSession = false
-            },
+            onAuthSuccess = onAuthSuccess,
+            onUnauthenticated = {},
             scope = scope
         )
     }
@@ -216,7 +210,7 @@ fun AuthScreen(
                             }
                         )
                     },
-                    enabled = !isSigningIn && !isCheckingSession,
+                    enabled = !isSigningIn,
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
@@ -227,7 +221,7 @@ fun AuthScreen(
                         .height(54.dp)
                         .testTag("google_sign_in_button")
                 ) {
-                    if (isSigningIn || isCheckingSession) {
+                    if (isSigningIn) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(22.dp),
                             color = MaterialTheme.colorScheme.onPrimary,
@@ -235,7 +229,7 @@ fun AuthScreen(
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(
-                            text = if (isCheckingSession) "Checking session..." else "Signing in...",
+                            text = "Signing in...",
                             style = MaterialTheme.typography.labelLarge
                         )
                     } else {

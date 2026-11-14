@@ -4,14 +4,18 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Groups
@@ -78,6 +82,7 @@ import com.example.ui.screens.WorkspacesAndExportScreen
 import com.example.ui.theme.VoiceLedgerTheme
 import com.example.ui.viewmodel.VoiceLedgerViewModel
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
@@ -125,6 +130,16 @@ private fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
 
 @Composable
 fun AppNavigation(initialNoteId: String? = null) {
+    val context = LocalContext.current
+    val isFirebaseReady = remember {
+        FirebaseApp.getApps(context).isNotEmpty() ||
+            runCatching { FirebaseApp.initializeApp(context) != null }.getOrDefault(false)
+    }
+    if (!isFirebaseReady) {
+        FirebaseConfigMissingScreen()
+        return
+    }
+
     val auth = remember { Firebase.auth }
     val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
 
@@ -139,6 +154,39 @@ fun AppNavigation(initialNoteId: String? = null) {
                 currentUserEmail = user.email.orEmpty(),
                 initialNoteId = initialNoteId
             )
+        }
+    }
+}
+
+@Composable
+private fun FirebaseConfigMissingScreen() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .safeDrawingPadding()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.errorContainer,
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.widthIn(max = 480.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "Firebase Config Missing in APK",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+                Text(
+                    text = "This APK was built without app/google-services.json. To enable sign-in, cloud sync, and AI transcription, add GOOGLE_SERVICES_JSON to your GitHub repository Secrets (or commit app/google-services.json) and rebuild the APK.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+            }
         }
     }
 }
