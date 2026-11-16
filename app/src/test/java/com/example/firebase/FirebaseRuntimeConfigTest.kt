@@ -34,7 +34,11 @@ class FirebaseRuntimeConfigTest {
                   "oauth_client": [
                     {
                       "client_id": "android-client.apps.googleusercontent.com",
-                      "client_type": 1
+                      "client_type": 1,
+                      "android_info": {
+                        "package_name": "com.aistudio.voiceledger.kvnqrx",
+                        "certificate_hash": "3F5DBB5AF4AF06B67834216EE8E5392346D85BFF"
+                      }
                     },
                     {
                       "client_id": "web-client.apps.googleusercontent.com",
@@ -63,6 +67,7 @@ class FirebaseRuntimeConfigTest {
         assertEquals("1234567890", parsed.gcmSenderId)
         assertEquals("demo-project-id.firebasestorage.app", parsed.storageBucket)
         assertEquals("web-client.apps.googleusercontent.com", parsed.webClientId)
+        assertEquals(listOf("3f5dbb5af4af06b67834216ee8e5392346d85bff"), parsed.registeredSha1Hashes)
     }
 
     @Test

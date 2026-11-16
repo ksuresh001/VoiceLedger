@@ -179,23 +179,43 @@ fun onGoogleSignInClicked(
         try {
             val result = try {
                 credentialManager.getCredential(activity, request)
-            } catch (e: Exception) {
-                // On Android 11, completing an "Add Google Account" / web login redirect inside
-                // GetSignInWithGoogleOption can interrupt or return NoCredentialException before
-                // handing back the token. Retry once with GetGoogleIdOption (all accounts).
-                if (e is NoCredentialException || e is GetCredentialInterruptedException) {
-                    Log.w(TAG, "Primary Google sign-in flow interrupted/empty (${e.javaClass.simpleName}); retrying with GetGoogleIdOption", e)
+            } catch (primaryError: Exception) {
+                if (primaryError is CancellationException) throw primaryError
+                // On Android 11, selecting an account in GetSignInWithGoogleOption can return
+                // GetCredentialCancellationException (when the sheet closes after account selection
+                // or OAuth client / SHA-1 mismatch occurs), NoCredentialException, or
+                // GetCredentialInterruptedException. Retry once with GetGoogleIdOption across all accounts.
+                if (
+                    primaryError is GetCredentialCancellationException ||
+                    primaryError is NoCredentialException ||
+                    primaryError is GetCredentialInterruptedException
+                ) {
+                    Log.w(
+                        TAG,
+                        "Primary GetSignInWithGoogleOption did not complete (${primaryError.javaClass.simpleName}: ${primaryError.message}); retrying with GetGoogleIdOption",
+                        primaryError
+                    )
                     val fallbackOption = GetGoogleIdOption.Builder()
                         .setFilterByAuthorizedAccounts(false)
                         .setServerClientId(clientId)
-                        .setAutoSelectEnabled(false)
+                        .setAutoSelectEnabled(true)
                         .build()
                     val fallbackRequest = GetCredentialRequest.Builder()
                         .addCredentialOption(fallbackOption)
                         .build()
-                    credentialManager.getCredential(activity, fallbackRequest)
+                    try {
+                        credentialManager.getCredential(activity, fallbackRequest)
+                    } catch (fallbackError: Exception) {
+                        if (fallbackError is CancellationException) throw fallbackError
+                        Log.w(
+                            TAG,
+                            "Fallback GetGoogleIdOption also failed (${fallbackError.javaClass.simpleName}: ${fallbackError.message})",
+                            fallbackError
+                        )
+                        throw primaryError
+                    }
                 } else {
-                    throw e
+                    throw primaryError
                 }
             }
 
@@ -214,6 +234,19 @@ fun onGoogleSignInClicked(
                 if (Firebase.auth.currentUser != null) {
                     onAuthSuccess()
                 } else {
+                    val detail = e.message?.trim().orEmpty()
+                    val activeProjectId = runCatching { FirebaseApp.getInstance().options.projectId }.getOrNull().orEmpty()
+                    onAuthError(
+                        buildString {
+                            append("Google Sign-In did not return an ID token after selecting your account.")
+                            if (activeProjectId.isNotBlank()) {
+                                append(" Make sure your GitHub GOOGLE_SERVICES_JSON secret matches project '$activeProjectId' (or commit the latest app/google-services.json) and rebuild the APK.")
+                            }
+                            if (detail.isNotBlank() && !detail.contains("activity is cancelled by the user", ignoreCase = true)) {
+                                append(" ($detail)")
+                            }
+                        }
+                    )
                     onAuthCancelled()
                 }
             }

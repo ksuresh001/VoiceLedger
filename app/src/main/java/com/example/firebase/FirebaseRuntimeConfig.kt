@@ -12,7 +12,8 @@ data class ParsedGoogleServices(
     val apiKey: String,
     val gcmSenderId: String,
     val storageBucket: String,
-    val webClientId: String
+    val webClientId: String,
+    val registeredSha1Hashes: List<String> = emptyList()
 )
 
 object FirebaseRuntimeConfig {
@@ -21,17 +22,35 @@ object FirebaseRuntimeConfig {
     private const val PREFS_NAME = "voiceledger_runtime_firebase"
     private const val KEY_JSON = "google_services_json"
     private const val KEY_WEB_CLIENT_ID = "web_client_id"
+    private const val KEY_PROJECT_ID = "project_id"
 
     fun ensureInitialized(context: Context): Boolean {
-        if (FirebaseApp.getApps(context).isNotEmpty()) return true
+        if (FirebaseApp.getApps(context).isNotEmpty()) {
+            syncPrefsWithActiveApp(context)
+            return true
+        }
         val defaultOk = runCatching { FirebaseApp.initializeApp(context) != null }.getOrDefault(false)
-        if (defaultOk && FirebaseApp.getApps(context).isNotEmpty()) return true
+        if (defaultOk && FirebaseApp.getApps(context).isNotEmpty()) {
+            syncPrefsWithActiveApp(context)
+            return true
+        }
 
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedJson = prefs.getString(KEY_JSON, null)?.trim().orEmpty()
         if (savedJson.isEmpty()) return false
 
         return initializeFromJson(context, savedJson).isSuccess
+    }
+
+    private fun syncPrefsWithActiveApp(context: Context) {
+        val activeProjectId = runCatching { FirebaseApp.getInstance().options.projectId }.getOrNull()
+        if (activeProjectId.isNullOrBlank()) return
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedProjectId = prefs.getString(KEY_PROJECT_ID, null)
+        if (!savedProjectId.isNullOrBlank() && savedProjectId != activeProjectId) {
+            // Bundled google-services.json changed to a newer Firebase project; clear stale runtime override
+            prefs.edit().clear().commit()
+        }
     }
 
     fun saveAndInitialize(context: Context, rawJson: String): Result<ParsedGoogleServices> {
@@ -43,6 +62,7 @@ object FirebaseRuntimeConfig {
                 .edit()
                 .putString(KEY_JSON, trimmed)
                 .putString(KEY_WEB_CLIENT_ID, parsed.webClientId)
+                .putString(KEY_PROJECT_ID, parsed.projectId)
                 .commit()
         }
         return res
@@ -85,13 +105,23 @@ object FirebaseRuntimeConfig {
             val apiKey = apiKeys.getJSONObject(0).getString("current_key").trim()
 
             var webClientId = ""
+            val sha1Hashes = mutableListOf<String>()
             val oauthClients = matchedClient.optJSONArray("oauth_client")
             if (oauthClients != null) {
                 for (i in 0 until oauthClients.length()) {
                     val oauth = oauthClients.getJSONObject(i)
-                    if (oauth.optInt("client_type", -1) == 3) {
+                    val clientType = oauth.optInt("client_type", -1)
+                    if (clientType == 1) {
+                        val hash = oauth.optJSONObject("android_info")
+                            ?.optString("certificate_hash", "")
+                            ?.trim()
+                            ?.lowercase()
+                            .orEmpty()
+                        if (hash.isNotEmpty()) {
+                            sha1Hashes.add(hash)
+                        }
+                    } else if (clientType == 3 && webClientId.isEmpty()) {
                         webClientId = oauth.optString("client_id", "").trim()
-                        if (webClientId.isNotEmpty()) break
                     }
                 }
             }
@@ -120,7 +150,8 @@ object FirebaseRuntimeConfig {
                 apiKey = apiKey,
                 gcmSenderId = gcmSenderId,
                 storageBucket = storageBucket,
-                webClientId = webClientId
+                webClientId = webClientId,
+                registeredSha1Hashes = sha1Hashes
             )
         }
     }
